@@ -1,0 +1,1300 @@
+-- OverTime Organizer Script
+-- Save path: /Users/hasankoyuncu/Library/Containers/com.apple.iWork.Numbers/Data/Documents/Overtime/
+-- Modified: Progress dialogs now close automatically after 1 second
+-- Added: "Help" button in welcome dialog with "About" and "Data About Codes" options
+
+global monthName, yearInput, monthInput, overtimeFolder, daysInMonth, fridays, employeeList, selectedEmployees, savePath
+
+tell me
+	activate
+	set showWelcome to true
+	repeat while showWelcome
+		try
+			set dialogResult to display dialog "Welcome to OverTime Organizer!" & return & return & "This app helps you create an overtime schedule in Numbers for a given month." & return & return & "Steps:" & return & "1. Enter the year and month." & return & "2. Select an employee list CSV file." & return & "3. Enter overtime details for each employee." & return & "4. Save the schedule as a Numbers document." buttons {"Help", "Cancel", "Continue"} default button "Continue" cancel button "Cancel" with title "OverTime Organizer" with icon note giving up after 0
+			set buttonPressed to button returned of dialogResult
+			if buttonPressed is "Continue" then
+				set showWelcome to false
+			else if buttonPressed is "Help" then
+				my showHelpDialog()
+			end if
+		on error errMsg number errNum
+			if errNum is -128 then
+				quit
+				return
+			else
+				display dialog "An unexpected error occurred: " & errMsg & " (Error number: " & errNum & ")" buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+				quit
+				return
+			end if
+		end try
+	end repeat
+end tell
+
+tell me
+	set validInput to false
+	repeat until validInput
+		activate
+		set userInput to display dialog "Enter year and month (YYYY,MM):" default answer "2025,3" buttons {"OK", "Cancel"} default button "OK" cancel button "Cancel" with title "OverTime Organizer" with icon note giving up after 0
+		try
+			set {yearInput, monthInput} to my parseYearMonth(text returned of userInput)
+			if yearInput < 2000 or yearInput > 2100 then
+				error "Year must be between 2000 and 2100."
+			end if
+			if monthInput < 1 or monthInput > 12 then
+				error "Month must be between 1 and 12."
+			end if
+			set validInput to true
+		on error errMsg
+			activate
+			display dialog "Error: " & errMsg & return & "Please enter a valid year and month (e.g., 2025,3)." buttons {"Try Again"} default button "Try Again" with title "OverTime Organizer" with icon note giving up after 0
+		end try
+	end repeat
+end tell
+
+tell current application
+	set monthNames to {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
+	set tempDate to current date
+	set year of tempDate to yearInput
+	set month of tempDate to monthInput
+	set day of tempDate to 1
+	set time of tempDate to 0
+	set startDate to tempDate
+	set fridays to {}
+	set daysInMonth to 31
+	if monthInput is in {4, 6, 9, 11} then
+		set daysInMonth to 30
+	else if monthInput is 2 then
+		set daysInMonth to 28
+		if (yearInput mod 4 is 0 and yearInput mod 100 is not 0) or (yearInput mod 400 is 0) then
+			set daysInMonth to 29
+		end if
+	end if
+	repeat with dayNum from 1 to daysInMonth
+		set currentDay to startDate + (dayNum - 1) * days
+		if (weekday of currentDay) as string is "Friday" then
+			set end of fridays to dayNum
+		end if
+	end repeat
+	set monthName to item monthInput of monthNames
+	log "monthName set to: " & monthName
+	
+	tell me
+		activate
+		set employeeFile to choose file with prompt "Please select the employee list CSV file:" of type {"csv"} default location (path to documents folder)
+	end tell
+	set csvContent to read employeeFile as «class utf8»
+	set employeeList to my parseCSV(csvContent)
+	if employeeList is {} then
+		tell me
+			activate
+			display dialog "Error: No employees found in the CSV file." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+		end tell
+		return
+	end if
+	
+	set selectedEmployees to {}
+	set continueAdding to true
+	repeat while continueAdding
+		tell me
+			activate
+			set remainingEmployees to my getRemainingEmployees(employeeList, selectedEmployees)
+			if remainingEmployees is {} then
+				set continueAdding to false
+			else
+				set employeeSelection to choose from list remainingEmployees with prompt "Select an employee:" cancel button name "Cancel"
+				if employeeSelection is false then
+					set continueAdding to false
+				else
+					set employeeProcessed to false
+					repeat until employeeProcessed
+						set selectedEmployee to item 1 of employeeSelection
+						set selectedEmployeeID to missing value
+						set originalEmployeeName to missing value
+						ignoring case
+							repeat with emp in employeeList
+								if (item 3 of emp) is equal to selectedEmployee then
+									set selectedEmployeeID to item 2 of emp
+									set originalEmployeeName to item 3 of emp
+									exit repeat
+								end if
+							end repeat
+						end ignoring
+						log "Selected employee: " & selectedEmployee
+						log "Original name: " & originalEmployeeName
+						if selectedEmployeeID is missing value then
+							activate
+							display dialog "Error: Could not find ID# for employee " & selectedEmployee buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+							set employeeProcessed to true
+						else
+							try
+								activate
+								set promptText to "Enter total overtime hours for employee:
+" & originalEmployeeName
+								set dialogResult to display dialog promptText default answer "100" buttons {"OK", "Cancel"} default button "OK" cancel button "Cancel" with title "OverTime Organizer" with icon note giving up after 0
+								set totalHours to text returned of dialogResult as number
+								if totalHours < 0 then error "Total hours cannot be negative."
+							on error errMsg
+								if errMsg contains "User canceled" then
+									set employeeProcessed to true
+									exit repeat
+								end if
+								activate
+								display dialog "Error: Please enter a valid number for total hours. " & errMsg buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+								return
+							end try
+							set nonWorkPeriods to {}
+							set nonWorkReasons to {}
+							set allNonWorkDays to {}
+							set absentChoice to missing value
+							set askAbsence to true
+							repeat while askAbsence
+								activate
+								set promptText to "Has this employee been absent many times this month?
+" & originalEmployeeName
+								set dialogResult to display dialog promptText buttons {"YES", "NO"} default button "NO" with title "OverTime Organizer" with icon note giving up after 0
+								set absentChoice to button returned of dialogResult
+								set askAbsence to false
+							end repeat
+							if absentChoice is "YES" then
+								set periodsValid to false
+								repeat until periodsValid
+									activate
+									set promptText to "Enter non-working day periods for employee (e.g., 1-5,9-15,24-27):
+" & originalEmployeeName
+									set dialogResult to display dialog promptText default answer "" buttons {"OK", "Back"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+									set periodsInput to text returned of dialogResult
+									if button returned of dialogResult is "Back" then
+										set periodsValid to true
+										set askAbsence to true
+										exit repeat
+									end if
+									try
+										set tempPeriods to my parseWorkPeriods(periodsInput, daysInMonth)
+										set tempNonWorkDays to {}
+										set hasOverlap to false
+										repeat with period in tempPeriods
+											repeat with dayNum from (startDay of period) to (endDay of period)
+												if dayNum is in tempNonWorkDays then
+													set hasOverlap to true
+													exit repeat
+												else
+													set end of tempNonWorkDays to dayNum
+												end if
+											end repeat
+											if hasOverlap then exit repeat
+										end repeat
+										if hasOverlap then
+											activate
+											display dialog "Error: Overlapping days detected in periods. Please enter non-overlapping periods." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+										else
+											set nonWorkPeriods to tempPeriods
+											set allNonWorkDays to tempNonWorkDays
+											set periodsValid to true
+										end if
+									on error errMsg
+										activate
+										display dialog "Error parsing non-working periods: " & errMsg buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+									end try
+								end repeat
+								if nonWorkPeriods is not {} and continueAdding and not askAbsence then
+									set nonWorkReasons to {}
+									repeat with period in nonWorkPeriods
+										set periodText to (startDay of period) & "-" & (endDay of period)
+										activate
+										set reasonSelection to choose from list {"Sick Leave", "Absence", "Penalty"} with prompt "Select reason for non-working days " & periodText & " for " & originalEmployeeName default items {"Sick Leave"} cancel button name "Cancel"
+										if reasonSelection is false then
+											set continueAdding to false
+											exit repeat
+										else
+											set end of nonWorkReasons to {startDay:startDay of period, endDay:endDay of period, reason:item 1 of reasonSelection}
+										end if
+									end repeat
+								end if
+							else
+								activate
+								set promptText to "Enter non-working day period for employee (e.g., 1-5):
+" & originalEmployeeName
+								set periodsInput to text returned of (display dialog promptText default answer "" buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0)
+								try
+									set tempPeriods to my parseWorkPeriods(periodsInput, daysInMonth)
+									if (count of tempPeriods) > 0 then
+										set nonWorkPeriods to tempPeriods
+										set period to item 1 of tempPeriods
+										set allNonWorkDays to {}
+										repeat with dayNum from (startDay of period) to (endDay of period)
+											set end of allNonWorkDays to dayNum
+										end repeat
+										activate
+										set reasonSelection to choose from list {"Vacation", "Sick Leave", "Absence", "Penalty", "Public Holiday"} with prompt "Select reason for non-working days " & (startDay of period) & "-" & (endDay of period) & " for " & originalEmployeeName default items {"Vacation"} cancel button name "Cancel"
+										if reasonSelection is false then
+											set continueAdding to false
+										else
+											set nonWorkReasons to {{startDay:startDay of period, endDay:endDay of period, reason:item 1 of reasonSelection}}
+										end if
+									end if
+								on error errMsg
+									activate
+									display dialog "Error parsing non-working period: " & errMsg buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+								end try
+							end if
+							if askAbsence then
+								set nonWorkPeriods to {}
+								set nonWorkReasons to {}
+								set allNonWorkDays to {}
+							else
+								if not continueAdding then exit repeat
+								try
+									set nonWorkReasons to my mergeNonWorkReasons(nonWorkReasons)
+								on error errMsg
+									activate
+									display dialog "Error merging non-working periods: " & errMsg buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+									set employeeProcessed to true
+									exit repeat
+								end try
+								set allNonWorkDays to {}
+								repeat with reasonEntry in nonWorkReasons
+									repeat with dayNum from (startDay of reasonEntry) to (endDay of reasonEntry)
+										if not (dayNum is in allNonWorkDays) then
+											set end of allNonWorkDays to dayNum
+										end if
+									end repeat
+								end repeat
+								set allWorkDays to {}
+								repeat with dayNum from 1 to daysInMonth
+									if not (dayNum is in allNonWorkDays) then
+										set end of allWorkDays to dayNum
+									end if
+								end repeat
+								set fridaysInRange to {}
+								repeat with dayNum in allWorkDays
+									set dayNumValue to dayNum as number
+									if dayNumValue is in fridays then set fridaysInRange to fridaysInRange & {dayNumValue}
+								end repeat
+								set maxFridays to count of fridaysInRange
+								set assignFridayOvertime to "NO"
+								set fridaysWorked to 0
+								if totalHours ≥ 10 and maxFridays > 0 then
+									activate
+									set promptText to "Do you want to assign overtime hours to Fridays for employee? (Fridays are assigned 10 hours each)
+" & originalEmployeeName
+									set fridayChoice to button returned of (display dialog promptText buttons {"YES", "NO"} default button "NO" with title "OverTime Organizer" with icon note giving up after 0)
+									set assignFridayOvertime to fridayChoice
+									if fridayChoice is "YES" then
+										set maxAllowableFridays to totalHours div 10
+										if maxAllowableFridays > maxFridays then set maxAllowableFridays to maxFridays
+										set suggestedFridays to maxFridays
+										if (suggestedFridays * 10) > totalHours then
+											set suggestedFridays to maxAllowableFridays
+										end if
+										try
+											activate
+											set fridayPrompt to "Enter Fridays worked (0-" & maxFridays & ") for employee (Total hours: " & totalHours & ", Suggested: " & suggestedFridays & "):
+" & originalEmployeeName
+											if maxFridays < (count of fridays) then
+												set fridayPrompt to fridayPrompt & "
+Available Fridays: " & (my listToString(fridaysInRange, ", "))
+											end if
+											set fridaysWorked to text returned of (display dialog fridayPrompt default answer (suggestedFridays as text) buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0) as number
+											if fridaysWorked < 0 then error "Fridays worked cannot be negative."
+											if fridaysWorked > maxFridays then set fridaysWorked to maxFridays
+											set fridayHours to fridaysWorked * 10
+											if fridayHours > totalHours then
+												set maxAllowableFridays to totalHours div 10
+												error "Friday overtime hours (" & fridayHours & ") cannot exceed total hours (" & totalHours & "). Please enter a value between 0 and " & maxAllowableFridays & "."
+											end if
+										on error errMsg
+											activate
+											display dialog "Error: " & errMsg buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+											return
+										end try
+									end if
+								end if
+								set employeeData to {employeeID:selectedEmployeeID, name:originalEmployeeName, totalHours:totalHours, workDays:allWorkDays, nonWorkPeriods:nonWorkPeriods, nonWorkReasons:nonWorkReasons, assignFridayOvertime:assignFridayOvertime, fridaysWorked:fridaysWorked, reason:""}
+								set selectedEmployees to selectedEmployees & {employeeData}
+								activate
+								set addAnother to button returned of (display dialog "Add another employee?" buttons {"Yes", "No"} default button "Yes" with title "OverTime Organizer" with icon note giving up after 0)
+								if addAnother is "No" then set continueAdding to false
+								set employeeProcessed to true
+							end if
+						end if
+					end repeat
+				end if
+			end if
+		end tell
+	end repeat
+	
+	-- Set the save path to the Numbers container
+	set numbersContainerPath to "/Users/hasankoyuncu/Library/Containers/com.apple.iWork.Numbers/Data/Documents/"
+	set overtimeFolder to numbersContainerPath & "Overtime/"
+	
+	if overtimeFolder does not end with "/" then
+		set overtimeFolder to overtimeFolder & "/"
+	end if
+	
+	set folderCreated to false
+	set maxRetries to 3
+	set retryCount to 0
+	repeat until folderCreated or retryCount ≥ maxRetries
+		try
+			tell application "System Events"
+				activate
+				delay 0.5
+				if not (exists folder overtimeFolder) then
+					make new folder at numbersContainerPath with properties {name:"Overtime"}
+				end if
+			end tell
+			set folderCreated to true
+		on error errMsg number errNum
+			set retryCount to retryCount + 1
+			if retryCount < maxRetries then
+				delay 1
+			else
+				try
+					tell application "Finder"
+						activate
+						if not (exists folder overtimeFolder) then
+							make new folder at (POSIX file numbersContainerPath as alias) with properties {name:"Overtime"}
+						end if
+					end tell
+					set folderCreated to true
+				on error finderErrMsg number finderErrNum
+					tell me
+						activate
+						display dialog "Error creating Overtime folder in Numbers container." & return & return & "System Events Error: " & errMsg & " (Error number: " & errNum & ")" & return & "Finder Error: " & finderErrMsg & " (Error number: " & finderErrNum & ")" & return & return & "Please ensure OverTimeOrganizer has permission to access the Numbers container in System Preferences > Security & Privacy > Privacy > Files and Folders and Automation." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+					end tell
+					return
+				end try
+			end if
+		end try
+	end repeat
+end tell
+
+tell application "Numbers"
+	tell me
+		activate
+		display dialog "Setting up the Numbers document..." & return & "Please wait..." buttons {} with title "OverTime Organizer" giving up after 1
+		delay 2
+	end tell
+	
+	set targetDocID to "7CDA7BED-8962-49AB-A809-FB53A5428C46"
+	set docExists to false
+	try
+		set testDoc to document id targetDocID
+		set docExists to true
+	end try
+	if docExists then
+		set newDoc to document id targetDocID
+	else
+		set newDoc to make new document
+	end if
+	set docID to id of newDoc
+	set theTable to table 1 of sheet 1 of newDoc
+	
+	if monthName is "" or monthName is missing value then
+		set monthNames to {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
+		if monthInput is missing value then set monthInput to 1
+		set monthName to item monthInput of monthNames
+		log "monthName redefined in Numbers block: " & monthName
+	end if
+	if yearInput is missing value then set yearInput to (year of (current date))
+	if daysInMonth is missing value then set daysInMonth to 31
+	if fridays is missing value then set fridays to {}
+	if selectedEmployees is missing value then set selectedEmployees to {}
+	
+	set fileName to "OverTimeSheet_of_" & monthName & "_" & yearInput
+	set name of theTable to fileName
+	
+	set column count of theTable to (4 + daysInMonth + 4)
+	set expectedRowCount to (2 + (count of selectedEmployees))
+	set row count of theTable to expectedRowCount
+	set header row count of theTable to 1
+	set header column count of theTable to 1
+	set rowHeightPoints to 20
+	repeat with i from 1 to expectedRowCount
+		set height of row i of theTable to rowHeightPoints
+	end repeat
+	delay 0.1
+	set actualRowCount to row count of theTable
+	if actualRowCount ≠ expectedRowCount then
+		tell me
+			activate
+			display dialog "Error: Table 1 row count mismatch. Expected " & expectedRowCount & " rows, but found " & actualRowCount & " rows." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+		end tell
+		return
+	end if
+	try
+		set text wrap of every cell of theTable to false
+	on error
+		-- Fallback UI scripting if needed
+	end try
+	set value of cell "A1" of theTable to "ID#"
+	set value of cell "B1" of theTable to "Name"
+	set value of cell "C1" of theTable to "Job"
+	set value of cell "D1" of theTable to "Department"
+	set dayNames to {}
+	set tempDate to current date
+	set year of tempDate to yearInput
+	set month of tempDate to monthInput
+	set day of tempDate to 1
+	set time of tempDate to 0
+	set startDate to tempDate
+	repeat with i from 1 to daysInMonth
+		set currentDay to startDate + (i - 1) * days
+		set dayName to (weekday of currentDay) as string
+		set shortDayName to text 1 thru 3 of dayName
+		set end of dayNames to shortDayName
+		set columnLetter to my getColumnLetter(i + 4)
+		set value of cell (columnLetter & "1") of theTable to shortDayName
+	end repeat
+	set lastDayColumn to my getColumnLetter(4 + daysInMonth)
+	set totalColumn to my getColumnLetter(5 + daysInMonth)
+	set totalDaysColumn to my getColumnLetter(6 + daysInMonth)
+	set reasonColumn to my getColumnLetter(7 + daysInMonth)
+	set approvalColumn to my getColumnLetter(8 + daysInMonth)
+	set value of cell (totalColumn & "1") of theTable to "Total"
+	set value of cell (totalDaysColumn & "1") of theTable to "TotalDays"
+	set value of cell (reasonColumn & "1") of theTable to "Reason"
+	set value of cell (approvalColumn & "1") of theTable to "Approval"
+	
+	set startCol to "A"
+	set endCol to my getColumnLetter(4 + daysInMonth + 4)
+	set background color of range (startCol & "1:" & endCol & "1") of theTable to {46003, 46003, 46003}
+	
+	repeat with dayNum in fridays
+		if dayNum ≤ daysInMonth then
+			set columnLetter to my getColumnLetter(dayNum + 4)
+			set background color of range (columnLetter & "1:" & columnLetter & "1") of theTable to {65535, 65535, 0}
+		end if
+	end repeat
+	
+	repeat with i from 1 to daysInMonth
+		set columnLetter to my getColumnLetter(i + 4)
+		set value of cell (columnLetter & "2") of theTable to i
+	end repeat
+	
+	try
+		merge range "B2:D2" of theTable
+		merge range (totalColumn & "2:" & approvalColumn & "2") of theTable
+	end try
+	
+	repeat with i from 1 to daysInMonth
+		set columnLetter to my getColumnLetter(i + 4)
+		if i is in fridays then
+			set background color of range (columnLetter & "2:" & columnLetter & "2") of theTable to {65535, 65535, 0}
+		else
+			set background color of range (columnLetter & "2:" & columnLetter & "2") of theTable to {59110, 59110, 59109}
+		end if
+	end repeat
+	set background color of range "A2:A2" of theTable to {59110, 59110, 59109}
+	set background color of range "B2:B2" of theTable to {59110, 59110, 59109}
+	set background color of range (totalColumn & "2:" & totalColumn & "2") of theTable to {59110, 59110, 59109}
+	
+	tell me
+		activate
+		display dialog "Populating employee data..." & return & "Please wait..." buttons {} with title "OverTime Organizer" giving up after 1
+		delay 2
+	end tell
+	
+	set rowNum to 3
+	repeat with empData in selectedEmployees
+		set empID to employeeID of empData
+		set empName to name of empData
+		set empDetails to missing value
+		repeat with empRecord in employeeList
+			if (item 2 of empRecord) is equal to empID then
+				set empDetails to empRecord
+				exit repeat
+			end if
+		end repeat
+		if empDetails is not missing value then
+			set deptValue to my cleanText(item 5 of empDetails)
+			set value of cell ("A" & rowNum) of theTable to (item 2 of empDetails)
+			set value of cell ("B" & rowNum) of theTable to empName
+			set value of cell ("C" & rowNum) of theTable to (item 4 of empDetails)
+			set value of cell ("D" & rowNum) of theTable to deptValue
+			set totalHours to totalHours of empData
+			set allWorkDays to workDays of empData
+			set nonWorkPeriods to nonWorkPeriods of empData
+			set nonWorkReasons to nonWorkReasons of empData
+			set assignFridayOvertime to assignFridayOvertime of empData
+			set fridaysWorked to fridaysWorked of empData
+			set overtimeReason to ""
+			set fridaysInRange to {}
+			set regularDaysList to {}
+			repeat with dayNum in allWorkDays
+				set dayNumValue to dayNum as number
+				if dayNumValue is in fridays then
+					set fridaysInRange to fridaysInRange & {dayNumValue}
+				else
+					set regularDaysList to regularDaysList & {dayNumValue}
+				end if
+			end repeat
+			set regularDays to count of regularDaysList
+			set fridayHours to 0
+			set assignedFridays to {}
+			if assignFridayOvertime is "YES" then
+				set actualFridaysWorked to fridaysWorked
+				if actualFridaysWorked > (count of fridaysInRange) then set actualFridaysWorked to (count of fridaysInRange)
+				set fridayHours to 10 * actualFridaysWorked
+				repeat with dayNum in fridaysInRange
+					set dayNumValue to dayNum as number
+					if (count of assignedFridays) < actualFridaysWorked then
+						set assignedFridays to assignedFridays & {dayNumValue}
+					end if
+				end repeat
+			end if
+			set regularHours to totalHours - fridayHours
+			if regularHours < 0 then set regularHours to 0
+			set dailyHoursList to {}
+			repeat daysInMonth times
+				set end of dailyHoursList to "-"
+			end repeat
+			repeat with dayNum in assignedFridays
+				set item dayNum of dailyHoursList to 10
+			end repeat
+			if regularHours > 0 and regularDays > 0 then
+				set shuffledDays to regularDaysList
+				set n to count of shuffledDays
+				repeat with i from n to 2 by -1
+					tell current application
+						set j to (random number from 1 to i)
+					end tell
+					set temp to item i of shuffledDays
+					set item i of shuffledDays to item j of shuffledDays
+					set item j of shuffledDays to temp
+				end repeat
+				set remainingHours to regularHours
+				set hoursPerDay to regularHours div regularDays
+				set extraHours to regularHours mod regularDays
+				set dayIndex to 1
+				set excessDays to {}
+				set totalDeductedHours to 0
+				repeat with dayNum in shuffledDays
+					if remainingHours > 0 then
+						set hoursToAssign to hoursPerDay
+						if dayIndex ≤ extraHours then set hoursToAssign to hoursToAssign + 1
+						if hoursToAssign > remainingHours then set hoursToAssign to remainingHours
+						if hoursToAssign = 0 and remainingHours > 0 then set hoursToAssign to 1
+						set originalHours to hoursToAssign
+						if hoursToAssign > 4 then
+							set excessHours to hoursToAssign - 4
+							set totalDeductedHours to totalDeductedHours + excessHours
+							set hoursToAssign to 4
+							set end of excessDays to "Day " & dayNum & " (" & originalHours & " hours reduced to 4)"
+						end if
+						set item dayNum of dailyHoursList to hoursToAssign
+						set remainingHours to remainingHours - hoursToAssign
+						set dayIndex to dayIndex + 1
+					end if
+				end repeat
+				if totalDeductedHours > 0 then
+					set boldEmpName to my boldText(empName)
+					set warningMessage to "Warning: The following non-Friday days were assigned more than 4 hours for " & boldEmpName & ":
+" & (my listToString(excessDays, "
+")) & "
+
+Total deducted hours: " & totalDeductedHours & "
+Original total: " & totalHours & " hours
+Adjusted total: " & (totalHours - totalDeductedHours) & " hours"
+					tell me
+						activate
+						display dialog warningMessage buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon caution giving up after 0
+					end tell
+				end if
+			end if
+			repeat with reasonEntry in nonWorkReasons
+				set reasonText to reason of reasonEntry
+				set reasonLetter to text 1 of reasonText
+				if reasonText is "Public Holiday" then set reasonLetter to "H"
+				set isRepeatedAbsence to (reasonText is in {"Sick Leave", "Absence", "Penalty"})
+				repeat with dayNum from (startDay of reasonEntry) to (endDay of reasonEntry)
+					if isRepeatedAbsence and (dayNum is in fridays) then
+						set item dayNum of dailyHoursList to "-"
+					else
+						set item dayNum of dailyHoursList to reasonLetter
+					end if
+				end repeat
+			end repeat
+			set assignedTotal to 0
+			repeat with i from 1 to daysInMonth
+				set hoursEntry to item i of dailyHoursList
+				if hoursEntry is not in {"-", "V", "S", "A", "P", "H"} then
+					set assignedTotal to assignedTotal + (hoursEntry as number)
+				end if
+			end repeat
+			set overtimeReason to ""
+			if assignedTotal ≥ 100 and assignedTotal ≤ 160 then
+				set overtimeReason to "Critical deadlines"
+			else if assignedTotal ≥ 70 and assignedTotal ≤ 99 then
+				set overtimeReason to "High workload"
+			else if assignedTotal ≥ 50 and assignedTotal ≤ 69 then
+				set overtimeReason to "Moderate overtime"
+			else if assignedTotal ≥ 20 and assignedTotal ≤ 49 then
+				set overtimeReason to "Occasional overtime"
+			else if assignedTotal ≥ 5 and assignedTotal ≤ 19 then
+				set overtimeReason to "Minimal overtime"
+			else
+				set overtimeReason to "Overtime outside defined ranges"
+			end if
+			set reason of empData to overtimeReason
+			
+			set startCol to my getColumnLetter(5)
+			set endCol to my getColumnLetter(4 + daysInMonth)
+			repeat with i from 1 to daysInMonth
+				set columnLetter to my getColumnLetter(i + 4)
+				set value of cell (columnLetter & rowNum) of theTable to item i of dailyHoursList
+			end repeat
+			
+			-- Note: Moved the Friday highlight loop to after the alternating row colors
+			
+			set startCol to my getColumnLetter(5)
+			set endCol to my getColumnLetter(4 + daysInMonth)
+			set sumFormula to "=SUM(" & startCol & rowNum & ":" & endCol & rowNum & ")"
+			set countFormula to "=COUNTA(" & startCol & rowNum & ":" & endCol & rowNum & ")-COUNTIF(" & startCol & rowNum & ":" & endCol & rowNum & ";\"V\")-COUNTIF(" & startCol & rowNum & ":" & endCol & rowNum & ";\"S\")-COUNTIF(" & startCol & rowNum & ":" & endCol & rowNum & ";\"A\")-COUNTIF(" & startCol & rowNum & ":" & endCol & rowNum & ";\"P\")-COUNTIF(" & startCol & rowNum & ":" & endCol & rowNum & ";\"H\")"
+			repeat with formulaInfo in {{column:totalColumn, formula:sumFormula, name:"SUM"}, {column:totalDaysColumn, formula:countFormula, name:"COUNTA"}}
+				set maxRetries to 3
+				set retryCount to 0
+				set formulaSet to false
+				repeat until formulaSet or retryCount ≥ maxRetries
+					try
+						tell theTable
+							set selection range to range ((column of formulaInfo) & rowNum & ":" & (column of formulaInfo) & rowNum)
+							set value of cell ((column of formulaInfo) & rowNum) to (formula of formulaInfo)
+						end tell
+						delay 0.1
+						set formulaSet to true
+					on error errMsg number errNum
+						set retryCount to retryCount + 1
+						if retryCount < maxRetries then
+							delay 0.5
+						else
+							tell me
+								activate
+								display dialog "Error setting " & (name of formulaInfo) & " formula in " & (column of formulaInfo) & rowNum & ": " & errMsg & " (Error number: " & errNum & ")
+Falling back to static value." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+							end tell
+							if (name of formulaInfo) is "SUM" then
+								set value of cell ((column of formulaInfo) & rowNum) of theTable to assignedTotal
+							else
+								set value of cell ((column of formulaInfo) & rowNum) of theTable to (count of allWorkDays)
+							end if
+							set formulaSet to true
+						end if
+					end try
+				end repeat
+			end repeat
+			set value of cell (reasonColumn & rowNum) of theTable to overtimeReason
+			set value of cell (approvalColumn & rowNum) of theTable to "Approved"
+		end if
+		set rowNum to rowNum + 1
+	end repeat
+	
+	set width of column 1 of theTable to 60
+	set width of column 2 of theTable to 130
+	set width of column 3 of theTable to 140
+	set width of column 4 of theTable to 140
+	repeat with i from 5 to (4 + daysInMonth)
+		set width of column i of theTable to 47
+	end repeat
+	set width of column (5 + daysInMonth) of theTable to 50
+	set width of column (6 + daysInMonth) of theTable to 90
+	set width of column (7 + daysInMonth) of theTable to 170
+	set width of column (8 + daysInMonth) of theTable to 80
+	
+	-- Apply alternating row colors to theTable (starting from row 3), excluding Friday columns
+	set whiteColor to {65535, 65535, 65535}
+	set lightGrayColor to {61166, 61166, 61166}
+	set startCol to "A"
+	set endCol to my getColumnLetter(4 + daysInMonth + 4)
+	
+	-- Get the list of Friday column letters
+	set fridayColumns to {}
+	repeat with dayNum in fridays
+		if dayNum ≤ daysInMonth then
+			set columnLetter to my getColumnLetter(dayNum + 4)
+			set end of fridayColumns to columnLetter
+		end if
+	end repeat
+	
+	-- For each row, apply alternating colors to non-Friday columns
+	repeat with i from 3 to row count of theTable
+		set rowColor to lightGrayColor
+		if (i mod 2) is 0 then
+			set rowColor to whiteColor
+		end if
+		
+		-- Define column ranges to apply the color, skipping Friday columns
+		set currentStartCol to "A"
+		set colNum to 1
+		repeat with j from 1 to (4 + daysInMonth + 4)
+			set currentColLetter to my getColumnLetter(j)
+			set isFridayColumn to (currentColLetter is in fridayColumns)
+			
+			if isFridayColumn then
+				-- Apply color to the range before this Friday column
+				if currentStartCol is not equal to currentColLetter then
+					set prevColLetter to my getColumnLetter(j - 1)
+					if j > 1 then
+						set background color of range (currentStartCol & i & ":" & prevColLetter & i) of theTable to rowColor
+					end if
+				end if
+				set currentStartCol to my getColumnLetter(j + 1)
+			else if j = (4 + daysInMonth + 4) then
+				-- Apply color to the last range
+				set background color of range (currentStartCol & i & ":" & currentColLetter & i) of theTable to rowColor
+			end if
+			set colNum to colNum + 1
+		end repeat
+	end repeat
+	
+	-- Reapply yellow highlights to Friday columns in employee rows
+	set rowNum to 3
+	repeat with empData in selectedEmployees
+		repeat with dayNum in fridays
+			if dayNum ≤ daysInMonth then
+				set columnLetter to my getColumnLetter(dayNum + 4)
+				set background color of range (columnLetter & rowNum & ":" & columnLetter & rowNum) of theTable to {65535, 65535, 0}
+			end if
+		end repeat
+		set rowNum to rowNum + 1
+	end repeat
+	
+	tell me
+		activate
+		display dialog "Creating summary tables..." & return & "Please wait..." buttons {} with title "OverTime Organizer" giving up after 1
+		delay 2
+	end tell
+	
+	tell sheet 1 of newDoc
+		set table1Position to position of theTable
+		set table1X to item 1 of table1Position
+		set table1Y to item 2 of table1Position
+		set table1Height to (row count of theTable) * rowHeightPoints
+		set gapHeight to 30
+		set absenceTypes to {}
+		repeat with empData in selectedEmployees
+			set nonWorkReasons to nonWorkReasons of empData
+			repeat with reasonEntry in nonWorkReasons
+				set reasonText to reason of reasonEntry
+				if reasonText is in {"Sick Leave", "Absence", "Penalty", "Vacation", "Public Holiday"} and reasonText is not in absenceTypes then
+					set end of absenceTypes to reasonText
+				end if
+			end repeat
+		end repeat
+		if (count of absenceTypes) > 0 then
+			set summaryRowCount to 1 + (count of absenceTypes)
+			if summaryRowCount < 2 then set summaryRowCount to 2
+			set summaryTable to make new table with properties {name:"Summary", row count:summaryRowCount, column count:3}
+			delay 0.1
+			repeat with i from 1 to summaryRowCount
+				set height of row i of summaryTable to rowHeightPoints
+			end repeat
+			set header row count of summaryTable to 1
+			set header column count of summaryTable to 0
+			set footer row count of summaryTable to 0
+			set value of cell "A1" of summaryTable to "Code"
+			set value of cell "B1" of summaryTable to "Reason"
+			set value of cell "C1" of summaryTable to "Total Days"
+			set sickLeaveTotal to 0
+			set absenceTotal to 0
+			set penaltyTotal to 0
+			set vacationTotal to 0
+			set holidayTotal to 0
+			repeat with empData in selectedEmployees
+				set nonWorkReasons to nonWorkReasons of empData
+				repeat with reasonEntry in nonWorkReasons
+					set reasonText to reason of reasonEntry
+					set daysCount to ((endDay of reasonEntry) - (startDay of reasonEntry) + 1)
+					if reasonText is "Sick Leave" then
+						set sickLeaveTotal to sickLeaveTotal + daysCount
+					else if reasonText is "Absence" then
+						set absenceTotal to absenceTotal + daysCount
+					else if reasonText is "Penalty" then
+						set penaltyTotal to penaltyTotal + daysCount
+					else if reasonText is "Vacation" then
+						set vacationTotal to vacationTotal + daysCount
+					else if reasonText is "Public Holiday" then
+						set holidayTotal to holidayTotal + daysCount
+					end if
+				end repeat
+			end repeat
+			set currentRow to 2
+			if "Sick Leave" is in absenceTypes then
+				set value of cell ("A" & currentRow) of summaryTable to "S"
+				set value of cell ("B" & currentRow) of summaryTable to "Sick Leave"
+				set value of cell ("C" & currentRow) of summaryTable to sickLeaveTotal
+				set currentRow to currentRow + 1
+			end if
+			if "Absence" is in absenceTypes then
+				set value of cell ("A" & currentRow) of summaryTable to "A"
+				set value of cell ("B" & currentRow) of summaryTable to "Absence"
+				set value of cell ("C" & currentRow) of summaryTable to absenceTotal
+				set currentRow to currentRow + 1
+			end if
+			if "Penalty" is in absenceTypes then
+				set value of cell ("A" & currentRow) of summaryTable to "P"
+				set value of cell ("B" & currentRow) of summaryTable to "Penalty"
+				set value of cell ("C" & currentRow) of summaryTable to penaltyTotal
+				set currentRow to currentRow + 1
+			end if
+			if "Vacation" is in absenceTypes then
+				set value of cell ("A" & currentRow) of summaryTable to "V"
+				set value of cell ("B" & currentRow) of summaryTable to "Vacation"
+				set value of cell ("C" & currentRow) of summaryTable to vacationTotal
+				set currentRow to currentRow + 1
+			end if
+			if "Public Holiday" is in absenceTypes then
+				set value of cell ("A" & currentRow) of summaryTable to "H"
+				set value of cell ("B" & currentRow) of summaryTable to "Public Holiday"
+				set value of cell ("C" & currentRow) of summaryTable to holidayTotal
+				set currentRow to currentRow + 1
+			end if
+			set width of column 1 of summaryTable to 50
+			set width of column 2 of summaryTable to 200
+			set width of column 3 of summaryTable to 100
+			set alignment of every cell of column 1 of summaryTable to left
+			set alignment of every cell of column 2 of summaryTable to left
+			set alignment of every cell of column 3 of summaryTable to right
+			set background color of range "A1:C1" of summaryTable to {46003, 46003, 46003}
+			set summaryY to table1Y + table1Height + gapHeight
+			set position of summaryTable to {table1X, summaryY}
+			set summaryHeight to (row count of summaryTable) * rowHeightPoints
+			
+			-- Apply alternating row colors to summaryTable (starting from row 2)
+			repeat with i from 2 to row count of summaryTable
+				if (i mod 2) is 0 then
+					set background color of range ("A" & i & ":C" & i) of summaryTable to whiteColor
+				else
+					set background color of range ("A" & i & ":C" & i) of summaryTable to lightGrayColor
+				end if
+			end repeat
+			
+		else
+			set summaryHeight to 0
+			set summaryY to table1Y + table1Height
+		end if
+		set lineManagerTable to make new table with properties {name:"Line Manager", row count:3, column count:2}
+		delay 0.1
+		repeat with i from 1 to 3
+			set height of row i of lineManagerTable to rowHeightPoints
+		end repeat
+		set header row count of lineManagerTable to 1
+		set header column count of lineManagerTable to 0
+		set footer row count of lineManagerTable to 0
+		set value of cell "A1" of lineManagerTable to "Manager Action"
+		set value of cell "B1" of lineManagerTable to "Details"
+		set value of cell "A2" of lineManagerTable to "Review Overtime"
+		if (count of absenceTypes) > 0 then
+			set value of cell "B2" of lineManagerTable to "Overtime reviewed, absences noted for " & (count of absenceTypes) & " type(s)"
+		else
+			set value of cell "B2" of lineManagerTable to "Overtime reviewed, no absences noted"
+		end if
+		set value of cell "A3" of lineManagerTable to "Approval Status"
+		set value of cell "B3" of lineManagerTable to "Pending"
+		set width of column 1 of lineManagerTable to 100
+		set width of column 2 of lineManagerTable to 250
+		set alignment of every cell of column 1 of lineManagerTable to left
+		set alignment of every cell of column 2 of lineManagerTable to left
+		set background color of range "A1:B1" of lineManagerTable to {46003, 46003, 46003}
+		set lineManagerY to summaryY + summaryHeight + gapHeight
+		set position of lineManagerTable to {table1X, lineManagerY}
+		
+		-- Apply alternating row colors to lineManagerTable (starting from row 2)
+		repeat with i from 2 to row count of lineManagerTable
+			if (i mod 2) is 0 then
+				set background color of range ("A" & i & ":B" & i) of lineManagerTable to whiteColor
+			else
+				set background color of range ("A" & i & ":B" & i) of lineManagerTable to lightGrayColor
+			end if
+		end repeat
+		
+	end tell
+	
+	tell me
+		activate
+		display dialog "Saving the document..." & return & "Please wait..." buttons {} with title "OverTime Organizer" giving up after 1
+		delay 2
+	end tell
+	
+	set savePath to overtimeFolder & fileName & ".numbers"
+	
+	tell application "System Events"
+		if exists file savePath then
+			tell me
+				activate
+				set overwriteChoice to button returned of (display dialog "File '" & fileName & ".numbers' already exists. Overwrite it?" buttons {"Yes", "No"} default button "No" with title "OverTime Organizer" with icon note giving up after 0)
+				if overwriteChoice is "Yes" then
+					tell application "Numbers"
+						try
+							repeat with doc in documents
+								if name of doc is (fileName & ".numbers") then
+									close doc saving no
+								end if
+							end repeat
+							delay 0.5
+						on error errMsg number errNum
+							log "Error closing existing document: " & errMsg & " (Error number: " & errNum & ")"
+						end try
+					end tell
+					tell application "System Events"
+						try
+							delete file savePath
+							delay 0.1
+						on error errMsg number errNum
+							tell me
+								activate
+								display dialog "Error deleting existing file: " & errMsg & " (Error number: " & errNum & ")" & return & "Attempting to proceed with save anyway." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+							end tell
+						end try
+					end tell
+				else
+					return
+				end if
+			end tell
+		end if
+	end tell
+	
+	try
+		tell application "Numbers"
+			save newDoc in POSIX file savePath
+			tell application "System Events"
+				set maxWait to 10
+				set waitInterval to 0.5
+				set totalWait to 0
+				repeat until (exists file savePath) or totalWait ≥ maxWait
+					delay waitInterval
+					set totalWait to totalWait + waitInterval
+				end repeat
+				if not (exists file savePath) then
+					error "File was not saved within the expected time."
+				end if
+			end tell
+		end tell
+	on error errMsg number errNum
+		tell me
+			activate
+			display dialog "Error saving document: " & errMsg & " (Error number: " & errNum & ")" & return & "Attempted save path: " & savePath & return & "Check if Numbers has permission to write to this directory." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+		end tell
+		return
+	end try
+	
+	try
+		tell application "Numbers"
+			close newDoc saving no
+			delay 0.5
+			activate
+			set reopenedDoc to open savePath
+			delay 0.5
+			tell table 1 of sheet 1 of reopenedDoc
+				set selection range to range "A1:A1"
+			end tell
+		end tell
+		delay 0.1
+		tell application "System Events"
+			set iCloudNumbersPath to (POSIX path of (path to library folder from user domain)) & "/Mobile Documents/com~apple~Numbers/Documents/"
+			if exists folder iCloudNumbersPath then
+				try
+					set untitledFiles to every file of folder iCloudNumbersPath whose name starts with "Untitled"
+					repeat with untitledFile in untitledFiles
+						delete untitledFile
+					end repeat
+					log "Deleted " & (count of untitledFiles) & " Untitled files from iCloud"
+				on error errMsg number errNum
+					log "iCloud cleanup error: " & errMsg & " (Error number: " & errNum & ")"
+				end try
+			else
+				log "iCloud Numbers folder not found: " & iCloudNumbersPath
+			end if
+		end tell
+	on error errMsg number errNum
+		tell me
+			activate
+			display dialog "Error closing or reopening document: " & errMsg & " (Error number: " & errNum & ")" & return & "Save path: " & savePath & return & "Ensure the file exists and Numbers has access." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+		end tell
+		return
+	end try
+end tell
+
+tell me
+	activate
+	set finalMessage to "Overtime schedule has been successfully created and saved!" & return & return & "File location: " & savePath & return & return & "Would you like to open the file location in Finder?"
+	set finalChoice to button returned of (display dialog finalMessage buttons {"Open in Finder", "Close"} default button "Close" with title "OverTime Organizer" with icon note giving up after 0)
+	if finalChoice is "Open in Finder" then
+		-- Double-check file existence with a retry mechanism
+		set fileExists to false
+		set maxRetries to 5
+		set retryCount to 0
+		set waitInterval to 0.5
+		tell application "System Events"
+			repeat until fileExists or retryCount ≥ maxRetries
+				if exists file savePath then
+					set fileExists to true
+				else
+					delay waitInterval
+					set retryCount to retryCount + 1
+				end if
+			end repeat
+		end tell
+		
+		if not fileExists then
+			tell me
+				activate
+				display dialog "Error: The file could not be found at the expected location after multiple attempts." & return & "Expected: " & savePath & return & "Please verify that the file was saved correctly and locate it manually." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+			end tell
+		else
+			try
+				tell application "Finder"
+					activate
+					-- Try revealing the file directly
+					set theFile to POSIX file savePath as alias
+					reveal theFile
+				end tell
+			on error errMsg number errNum
+				-- Fallback 1: Try revealing the folder
+				try
+					tell application "Finder"
+						activate
+						set theFolder to POSIX file overtimeFolder as alias
+						reveal theFolder
+						tell me
+							activate
+							display dialog "Could not reveal the file directly, but the containing folder has been opened in Finder." & return & "File: " & fileName & ".numbers" & return & "Folder: " & overtimeFolder & return & "Please locate the file manually within the folder." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+						end tell
+					end tell
+				on error folderErrMsg number folderErrNum
+					-- Fallback 2: Open the file directly in Numbers
+					try
+						tell application "Numbers"
+							activate
+							open savePath
+						end tell
+						tell me
+							activate
+							display dialog "Could not open the file location in Finder due to sandboxing restrictions." & return & "The file has been opened in Numbers instead." & return & return & "File path: " & savePath buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+						end tell
+					on error numbersErrMsg number numbersErrNum
+						tell me
+							activate
+							display dialog "Error opening file location in Finder: " & errMsg & " (Error number: " & errNum & ")" & return & "File path: " & savePath & return & return & "Additional error when trying to open the folder: " & folderErrMsg & " (Error number: " & folderErrNum & ")" & return & "Failed to open the file in Numbers: " & numbersErrMsg & " (Error number: " & numbersErrNum & ")" & return & return & "Please check the following:" & return & "1. Verify that the file exists at the specified path." & return & "2. Ensure Finder and Numbers have permission to access the Numbers container (System Preferences > Security & Privacy > Files and Folders)." & return & "3. Locate the file manually at: " & savePath buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+						end tell
+					end try
+				end try
+			end try
+		end if
+	end if
+end tell
+
+tell me
+	quit
+end tell
+
+-- Helper Functions
+
+on parseYearMonth(inputText)
+	set AppleScript's text item delimiters to ","
+	set yearInput to text item 1 of inputText as number
+	set monthInput to text item 2 of inputText as number
+	set AppleScript's text item delimiters to ""
+	return {yearInput, monthInput}
+end parseYearMonth
+
+on parseCSV(csvText)
+	set AppleScript's text item delimiters to "
+"
+	set csvLines to text items of csvText
+	set AppleScript's text item delimiters to ";"
+	set employeeList to {}
+	set isFirstLine to true
+	repeat with csvLine in csvLines
+		if csvLine is not "" then
+			if isFirstLine then
+				set isFirstLine to false
+			else
+				set employeeData to text items of csvLine
+				if (count of employeeData) ≥ 5 then
+					set end of employeeList to employeeData
+				end if
+			end if
+		end if
+	end repeat
+	set AppleScript's text item delimiters to ""
+	return employeeList
+end parseCSV
+
+on parseWorkPeriods(inputText, daysInMonth)
+	if inputText is "" then return {}
+	set AppleScript's text item delimiters to ","
+	set periodStrings to text items of inputText
+	set workPeriods to {}
+	repeat with periodString in periodStrings
+		set AppleScript's text item delimiters to "-"
+		set periodParts to text items of periodString
+		if (count of periodParts) is 2 then
+			try
+				set startDay to (text item 1 of periodParts) as number
+				set endDay to (text item 2 of periodParts) as number
+				if startDay ≥ 1 and endDay ≤ daysInMonth and startDay ≤ endDay then
+					set end of workPeriods to {startDay:startDay, endDay:endDay}
+				end if
+			end try
+		end if
+	end repeat
+	set AppleScript's text item delimiters to ""
+	return workPeriods
+end parseWorkPeriods
+
+on getRemainingEmployees(employeeList, selectedEmployees)
+	set remaining to {}
+	set selectedNames to {}
+	repeat with empData in selectedEmployees
+		set selectedNames to selectedNames & {name of empData}
+	end repeat
+	repeat with emp in employeeList
+		set empName to item 3 of emp
+		if empName is not in selectedNames then set end of remaining to empName
+	end repeat
+	return remaining
+end getRemainingEmployees
+
+on getColumnLetter(colNum)
+	set colLetters to "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	if colNum ≤ 26 then
+		return character colNum of colLetters
+	else
+		set firstLetter to character ((colNum - 1) div 26) of colLetters
+		set secondLetter to character ((colNum - 1) mod 26 + 1) of colLetters
+		return firstLetter & secondLetter
+	end if
+end getColumnLetter
+
+on cleanText(inputText)
+	set AppleScript's text item delimiters to {return, linefeed}
+	set textItems to text items of inputText
+	set AppleScript's text item delimiters to " "
+	set cleanedText to textItems as text
+	set AppleScript's text item delimiters to ""
+	return cleanedText
+end cleanText
+
+on listToString(theList, delim)
+	set oldDelim to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to delim
+	set theString to theList as text
+	set AppleScript's text item delimiters to oldDelim
+	return theString
+end listToString
+
+on boldText(inputText)
+	set normalChars to "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	set boldChars to "𝐀𝐁𝐂𝐃𝐄𝐅𝐆𝐇𝐈𝐉𝐊𝐋𝐌𝐍𝐎𝐏𝐐𝐑𝐒𝐓𝐔𝐕𝐖𝐗𝐘𝐙𝐚𝐛𝐜𝐝𝐞𝐟𝐠𝐡𝐢𝐣𝐤𝐥𝐦𝐧𝐨𝐩𝐪𝐫𝐬𝐭𝐮𝐯𝐰𝐱𝐲𝐳"
+	set resultText to ""
+	repeat with char in inputText
+		set charStr to char as text
+		set charPos to offset of charStr in normalChars
+		if charPos > 0 then
+			set resultText to resultText & character charPos of boldChars
+		else
+			set resultText to resultText & charStr
+		end if
+	end repeat
+	return resultText
+end boldText
+
+on mergeNonWorkReasons(nonWorkReasons)
+	set mergedReasons to {}
+	set reasonGroups to {{"Sick Leave", {}}, {"Absence", {}}, {"Penalty", {}}, {"Vacation", {}}, {"Public Holiday", {}}}
+	repeat with reasonEntry in nonWorkReasons
+		set theReason to reason of reasonEntry
+		set startDay to startDay of reasonEntry
+		set endDay to endDay of reasonEntry
+		repeat with group in reasonGroups
+			if (item 1 of group) is theReason then
+				set end of (item 2 of group) to {startDay:startDay, endDay:endDay}
+				exit repeat
+			end if
+		end repeat
+	end repeat
+	repeat with group in reasonGroups
+		set theReason to item 1 of group
+		set periods to item 2 of group
+		if theReason is in {"Sick Leave", "Absence", "Penalty"} then
+			if (count of periods) > 0 then
+				set sortedPeriods to my sortPeriods(periods)
+				set mergedPeriods to {}
+				set currentPeriod to item 1 of sortedPeriods
+				repeat with i from 2 to (count of sortedPeriods)
+					set nextPeriod to item i of sortedPeriods
+					if (startDay of nextPeriod) ≤ ((endDay of currentPeriod) + 1) then
+						if (endDay of nextPeriod) > (endDay of currentPeriod) then
+							set endDay of currentPeriod to endDay of nextPeriod
+						end if
+					else
+						set end of mergedPeriods to currentPeriod
+						set currentPeriod to nextPeriod
+					end if
+				end repeat
+				set end of mergedPeriods to currentPeriod
+				repeat with period in mergedPeriods
+					set end of mergedReasons to {startDay:startDay of period, endDay:endDay of period, reason:theReason}
+				end repeat
+			end if
+		else if theReason is in {"Vacation", "Public Holiday"} then
+			if (count of periods) > 1 then
+				error theReason & " cannot be assigned multiple times in a month. Please assign it to only one period."
+			else if (count of periods) is 1 then
+				set period to item 1 of periods
+				set end of mergedReasons to {startDay:startDay of period, endDay:endDay of period, reason:theReason}
+			end if
+		end if
+	end repeat
+	return mergedReasons
+end mergeNonWorkReasons
+
+on sortPeriods(periods)
+	set sorted to periods
+	set n to count of sorted
+	repeat with i from 1 to (n - 1)
+		repeat with j from 1 to (n - i)
+			set period1 to item j of sorted
+			set period2 to item (j + 1) of sorted
+			if (startDay of period1) > (startDay of period2) then
+				set item j of sorted to period2
+				set item (j + 1) of sorted to period1
+			end if
+		end repeat
+	end repeat
+	return sorted
+end sortPeriods
+
+-- New Handlers for Help Functionality
+
+on showHelpDialog()
+	set showHelp to true
+	repeat while showHelp
+		tell me
+			activate
+			set helpChoice to button returned of (display dialog "Help Options" & return & return & "Select an option to learn more about OverTime Organizer:" buttons {"About OverTime Organizer", "Data About Codes", "Back"} default button "Back" with title "OverTime Organizer - Help" with icon note giving up after 0)
+			if helpChoice is "About OverTime Organizer" then
+				my showAboutDialog()
+			else if helpChoice is "Data About Codes" then
+				my showCodesDialog()
+			else if helpChoice is "Back" then
+				set showHelp to false
+			end if
+		end tell
+	end repeat
+end showHelpDialog
+
+on showAboutDialog()
+	tell me
+		activate
+		display dialog "OverTime Organizer" & return & return & "Version 1.0" & return & "Created by Hasan Koyuncu" & return & "© 2025 Hasan Koyuncu" & return & return & "This application helps you create and manage overtime schedules in Numbers." & return & return & "For support, visit: https://www.hasankoyuncu.com" & return & "Contact: hasan@hasankoyuncu.com" buttons {"OK"} default button "OK" with title "About OverTime Organizer" with icon note giving up after 0
+	end tell
+end showAboutDialog
+
+on showCodesDialog()
+	tell me
+		activate
+		display dialog "Data About Codes" & return & return & "The following codes are used in the overtime schedule:" & return & return & "• S: Sick Leave" & return & "• A: Absence" & return & "• P: Penalty" & return & "• V: Vacation" & return & "• H: Public Holiday" & return & "• -: No overtime or absence" & return & return & "Numbers in the schedule represent overtime hours worked on that day." buttons {"OK"} default button "OK" with title "OverTime Organizer" with icon note giving up after 0
+	end tell
+end showCodesDialog
